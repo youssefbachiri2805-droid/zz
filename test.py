@@ -13,3 +13,7 @@ def extraire_nom(beneficiaire: str, prenoms: set):
         if mot in prenoms and i > 0:
             return mots[i-1]  # mot juste avant le prénom
     return None
+
+
+
+beneficiaires_df["Nom"] = beneficiaires_df["beneficiaire"].apply(lambda x: extraire_nom(x, prenoms))
