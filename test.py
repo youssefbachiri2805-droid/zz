@@ -1,7 +1,7 @@
 import pandas as pd
 import re
 
-ef extraire_nom(beneficiaires, prenoms):
+def extraire_nom(beneficiaires, prenoms):
     """
     Extraire le nom (mot avant le prénom) pour chaque bénéficiaire.
     Input :
@@ -23,5 +23,14 @@ ef extraire_nom(beneficiaires, prenoms):
     
     return beneficiaires.apply(_extract)
 
-# --- Appel de la fonction comme tu veux ---
+# --- Lecture des fichiers DEL ---
+# ⚠️ Remplace "beneficiaires.DEL" et "prenoms.DEL" par tes fichiers réels
+beneficiaires_df = pd.read_csv("beneficiaires.DEL", sep="|", quotechar='"', dtype=str)
+prenoms_df = pd.read_csv("prenoms.DEL", sep="|", quotechar='"', dtype=str)
+
+# --- Application de la fonction ---
 beneficiaires_df["Nom"] = extraire_nom(beneficiaires_df["beneficiaire"], prenoms_df["prenom"])
+
+# --- Sauvegarde en fichier DEL ---
+# ⚠️ Choisis le nom que tu veux pour la sortie
+beneficiaires_df.to_csv("beneficiaires_output.DEL", sep="|", index=False, quoting=1)  # quoting=1 → csv.QUOTE_ALL
