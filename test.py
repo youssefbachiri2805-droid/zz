@@ -4,6 +4,16 @@ import unicodedata
 import pandas as pd
 from typing import Optional, Tuple, Set
 
+# construction du NOM en retirant les titles
+def clean_nom(nom: Optional[str]) -> Optional[str]:
+    if not nom:
+        return None
+    words = [w for w in nom.split() if not is_title_token(w)]
+    if not words:
+        return None
+    return " ".join(words)
+
+
 # ==== CONFIG / listes utiles ====
 TITLES = {"m", "mr", "mme", "madame", "monsieur", "mlle", "mme.", "m.", "dr", "pr", "prof"}
 SKIP_TOKENS = {"de", "du", "la", "le", "les", "des", "d'", "bin", "ben", "ibn", "al", "el"}
