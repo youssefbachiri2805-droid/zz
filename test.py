@@ -1,4 +1,4 @@
-# extract_nom_prenom_v5.py
+# extract_nom_prenom_multiple.py
 import re
 import unicodedata
 import pandas as pd
@@ -64,11 +64,9 @@ def parse_name(text: str, prenoms_set: Optional[Set[str]] = None) -> Tuple[Optio
     if not s:
         return (None, None, "faible")
 
-    # Si mots clés entreprise
     if any(w.upper() in COMPANY_WORDS for w in s.split()):
         return (None, text.strip(), "faible")
 
-    # Si contient un nombre → confiance faible
     if NUM_RE.search(text):
         return (None, text.strip(), "faible")
 
@@ -82,16 +80,6 @@ def parse_name(text: str, prenoms_set: Optional[Set[str]] = None) -> Tuple[Optio
     if not words:
         return (None, None, "faible")
 
-    if ',' in text:
-        left, right = text.split(',', 1)
-        left_words = split_tokens(normalize(left))
-        right_words = split_tokens(normalize(right))
-        if right_words:
-            prenom = right_words[0]
-            nom = " ".join(left_words) if left_words else None
-            return (prenom, nom, "élevé")
-
-    # Gestion titres multiples : dernier title avant NOM+PRENOM
     last_title_idx = -1
     for i, w in enumerate(words):
         if is_title_token(w):
@@ -101,7 +89,6 @@ def parse_name(text: str, prenoms_set: Optional[Set[str]] = None) -> Tuple[Optio
         prenom = " ".join(words[last_title_idx+2:]) if len(words) > last_title_idx+2 else None
         return (prenom, nom, "élevé")
 
-    # Recherche prénom dans liste
     if prenoms_set:
         lower_tokens = [w.lower() for w in words]
         for idx, lt in enumerate(lower_tokens):
@@ -128,7 +115,6 @@ def parse_name(text: str, prenoms_set: Optional[Set[str]] = None) -> Tuple[Optio
         return (None, words[0], "faible")
 
     return (None, None, "faible")
-
 
 def _load_prenoms(prenom_list_path: Optional[str], prenom_series: Optional[pd.Series]) -> Tuple[Optional[Set[str]], Optional[Set[str]]]:
     if prenom_series is not None:
@@ -167,49 +153,46 @@ def _prenom_matches(prenom: Optional[str], prenoms_set: Optional[Set[str]], pren
             return True
     return False
 
-
-def process_excel(input_excel: str,
-                  output_excel: Optional[str] = None,
-                  prenom_list_path: Optional[str] = None,
-                  prenom_series: Optional[pd.Series] = None,
-                  sheet_name: Optional[str] = None) -> pd.DataFrame:
+def process_excel_multi(input_excel: str,
+                        output_excel: Optional[str] = None,
+                        prenom_list_path: Optional[str] = None,
+                        prenom_series: Optional[pd.Series] = None,
+                        sheet_name: Optional[str] = None) -> pd.DataFrame:
 
     df = pd.read_excel(input_excel, sheet_name=sheet_name) if sheet_name else pd.read_excel(input_excel)
-    if "BENEFICIARES" not in df.columns:
-        raise ValueError("Le fichier Excel doit contenir une colonne appelée 'BENEFICIARES'")
-
     prenoms_set, prenoms_set_noacc = _load_prenoms(prenom_list_path, prenom_series)
 
-    results = df["BENEFICIARES"].astype(object).apply(lambda x: parse_name(x, prenoms_set))
-    df[["PRENOM","NOM","CONFIDENCE"]] = pd.DataFrame(results.tolist(), index=df.index)
+    cols = ["BENEFICIAIRE 1", "BENEFICIAIRE 2", "BENEFICIAIRE 3"]
+    for col in cols:
+        if col not in df.columns:
+            raise ValueError(f"Le fichier Excel doit contenir une colonne appelée '{col}'")
+        results = df[col].astype(object).apply(lambda x: parse_name(x, prenoms_set))
+        df[[f"PRENOM_{col}", f"NOM_{col}", f"CONFIDENCE_{col}"]] = pd.DataFrame(results.tolist(), index=df.index)
 
-    # Ajouter + si prénom trouvé
-    def update_conf(row):
-        conf = row["CONFIDENCE"]
-        prenom = row["PRENOM"]
-        if prenom and _prenom_matches(prenom, prenoms_set, prenoms_set_noacc):
-            if conf.lower().startswith("élevé") and not conf.endswith('+'):
-                return "SURE"
-            elif conf.lower().startswith("moyen") and not conf.endswith('+'):
-                return "moyen+"
-        return conf
-    df["CONFIDENCE"] = df.apply(update_conf, axis=1)
+        # Ajouter + si prénom trouvé
+        def update_conf(row):
+            conf = row[f"CONFIDENCE_{col}"]
+            prenom = row[f"PRENOM_{col}"]
+            if prenom and _prenom_matches(prenom, prenoms_set, prenoms_set_noacc):
+                if conf.lower().startswith("élevé") and not conf.endswith('+'):
+                    return "SURE"
+                elif conf.lower().startswith("moyen") and not conf.endswith('+'):
+                    return "CRITIQUE"
+            return conf
+        df[f"CONFIDENCE_{col}"] = df.apply(update_conf, axis=1)
 
-    # TRAITEMENT FAIBLE et MOYEN
-    mask_faible_moyen = df["CONFIDENCE"].str.lower().str.startswith(("faible","moyen"))
-    df.loc[mask_faible_moyen, "NOM"] = df.loc[mask_faible_moyen, "BENEFICIARES"]
-    df.loc[mask_faible_moyen, "PRENOM"] = None
-    df.loc[mask_faible_moyen & df["CONFIDENCE"].str.lower().str.startswith("moyen"), "CONFIDENCE"] = "élevé"
-    df.loc[mask_faible_moyen & df["CONFIDENCE"].str.lower().str.startswith("faible"), "CONFIDENCE"] = "SURE"
+        # TRAITEMENT FAIBLE et MOYEN
+        mask_faible_moyen = df[f"CONFIDENCE_{col}"].str.lower().str.startswith(("faible","moyen"))
+        df.loc[mask_faible_moyen, f"NOM_{col}"] = df.loc[mask_faible_moyen, col]
+        df.loc[mask_faible_moyen, f"PRENOM_{col}"] = None
+        df.loc[mask_faible_moyen & df[f"CONFIDENCE_{col}"].str.lower().str.startswith("moyen"), f"CONFIDENCE_{col}"] = "élevé"
+        df.loc[mask_faible_moyen & df[f"CONFIDENCE_{col}"].str.lower().str.startswith("faible"), f"CONFIDENCE_{col}"] = "SURE"
 
-    # Conversion final + renommage moyen-élevé
-    df["CONFIDENCE"] = df["CONFIDENCE"].replace({"moyen-élevé":"MOYEN", "moyen+":"MOYEN", "élevé+":"SURE"})
+        # Vérification longueur NOM >=3 lettres
+        df[f"NOM_{col}"] = df[f"NOM_{col}"].apply(lambda x: x if x and len(str(x).strip()) >=3 else None)
 
-    # Vérification longueur NOM >=3 lettres
-    df["NOM"] = df["NOM"].apply(lambda x: x if x and len(str(x).strip()) >=3 else None)
-
-    # Supprimer PRENOM
-    df = df.drop(columns=["PRENOM"])
+        # Supprimer PRENOM intermédiaire
+        df = df.drop(columns=[f"PRENOM_{col}"])
 
     if output_excel:
         df.to_excel(output_excel, index=False)
@@ -220,8 +203,8 @@ def process_excel(input_excel: str,
 # ==== Exemple d'utilisation ====
 if __name__ == "__main__":
     try:
-        out = process_excel("input.xlsx", output_excel="input_extracted.xlsx", prenom_list_path="prenoms.csv")
+        out = process_excel_multi("input.xlsx", output_excel="input_extracted.xlsx", prenom_list_path="prenoms.csv")
         print("Traitement terminé. Exemple lignes extraites :")
-        print(out.head(20)[["BENEFICIARES","NOM","CONFIDENCE"]])
+        print(out.head(20))
     except Exception as e:
         print("Erreur :", e)
