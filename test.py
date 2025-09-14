@@ -225,3 +225,75 @@ if __name__ == "__main__":
         print(out.head(20))
     except Exception as e:
         print("Erreur :", e)
+
+
+def parse_name(text: str, prenoms_set: Optional[Set[str]] = None) -> Tuple[Optional[str], Optional[str], str]:
+    """
+    Retourne (PRENOM, NOM, CONFIDENCE)
+    Toujours NOM → PRENOM pour l'ordre des bénéficiaires.
+    """
+    if pd.isna(text):
+        text = ""
+    text = str(text)
+    s = normalize(text)
+    if not s:
+        return (None, None, "faible")
+
+    # mot clé société
+    if any(w.upper() in COMPANY_WORDS for w in s.split()):
+        return (None, text.strip(), "faible")
+
+    # contient nombre
+    if NUM_RE.search(text):
+        return (None, text.strip(), "faible")
+
+    # cas explicite avec labels "NOM", "PRENOM"
+    explicit = probable_name_from_label(text)
+    if explicit:
+        prenom, nom = explicit
+        conf = "élevé" if prenom or nom else "faible"
+        return (prenom if prenom else None, nom if nom else None, conf)
+
+    words = split_tokens(s)
+    if not words:
+        return (None, None, "faible")
+
+    # TITLES multiples
+    last_title_idx = -1
+    for i, w in enumerate(words):
+        if is_title_token(w):
+            last_title_idx = i
+    if last_title_idx != -1 and last_title_idx < len(words)-1:
+        nom = words[last_title_idx+1]  # NOM après le dernier title
+        prenom = " ".join(words[last_title_idx+2:]) if len(words) > last_title_idx+2 else None
+        return (prenom, nom, "élevé")
+
+    # token based matching avec liste de prénoms
+    if prenoms_set:
+        lower_tokens = [w.lower() for w in words]
+        for idx, lt in enumerate(lower_tokens):
+            if lt in prenoms_set:
+                prenom = words[idx]
+                if idx+1 < len(words):
+                    for j in range(idx+1, len(words)):
+                        cand = words[j]
+                        if cand.lower() not in SKIP_TOKENS and not is_title_token(cand):
+                            nom = " ".join(words[:idx])  # NOM = tout avant le prénom
+                            return (prenom, nom, "élevé")
+                if idx-1 >= 0:
+                    nom = words[idx-1]
+                    return (prenom, nom, "moyen")
+                return (prenom, None, "moyen")
+
+    # Cas général ≥2 mots : premier = NOM, reste = PRENOM
+    if len(words) >= 2:
+        nom = words[0]
+        prenom = " ".join(words[1:])
+        return (prenom, nom, "moyen")
+
+    # 1 mot → tout dans NOM
+    if len(words) == 1:
+        return (None, words[0], "faible")
+
+    return (None, None, "faible")
+
