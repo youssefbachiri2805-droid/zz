@@ -1,4 +1,4 @@
-# extract_nom_prenom_v2.py
+# extract_nom_prenom_v3.py
 import re
 import unicodedata
 import pandas as pd
@@ -9,7 +9,7 @@ TITLES = {"m", "mr", "mme", "madame", "monsieur", "mlle", "mme.", "m.", "dr", "p
 SKIP_TOKENS = {"de", "du", "la", "le", "les", "des", "d'", "bin", "ben", "ibn", "al", "el"}
 
 EMAIL_RE = re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b')
-PHONE_RE = re.compile(r'(\+?\d[\d\-\s().]{6,}\d)')  # permissive phone pattern
+PHONE_RE = re.compile(r'(\+?\d[\d\-\s().]{6,}\d)')
 BRACKET_RE = re.compile(r'[\[\]\(\)]')
 MULTISPACE = re.compile(r'\s+')
 
@@ -60,7 +60,6 @@ def probable_name_from_label(s: str) -> Optional[Tuple[str,str]]:
 def parse_name(text: str, prenoms_set: Optional[Set[str]] = None) -> Tuple[Optional[str], Optional[str], str]:
     """
     Retourne (prenom, nom, confidence) où confidence in {"faible","moyen","élevé"}.
-    (La fonction garde la même logique d'extraction qu'avant.)
     """
     s = normalize(text)
     if not s:
@@ -87,32 +86,33 @@ def parse_name(text: str, prenoms_set: Optional[Set[str]] = None) -> Tuple[Optio
             nom = " ".join(left_words) if left_words else None
             return (prenom, nom, "élevé")
 
+    # Gestion des titres : TITLE + NOM + PRENOM
+    if is_title_token(words[0]):
+        if len(words) >= 3:
+            nom = words[1]
+            prenom = " ".join(words[2:])
+            return (prenom, nom, "élevé")
+        elif len(words) == 2:
+            prenom = words[1]
+            nom = None
+            return (prenom, nom, "moyen")
+
     if prenoms_set:
         lower_tokens = [w.lower() for w in words]
         for idx, lt in enumerate(lower_tokens):
             if lt in prenoms_set:
                 prenom = words[idx]
-                # rechercher nom à droite d'abord
+                # recherche nom à droite d'abord
                 if idx+1 < len(words):
                     for j in range(idx+1, len(words)):
                         cand = words[j]
                         if cand.lower() not in SKIP_TOKENS and not is_title_token(cand):
                             nom = " ".join(words[j:])
                             return (prenom, nom, "élevé")
-                # fallback: token précédent
                 if idx-1 >= 0:
                     nom = words[idx-1]
                     return (prenom, nom, "moyen")
                 return (prenom, None, "moyen")
-
-    if is_title_token(words[0]):
-        if len(words) >= 3:
-            prenom = words[1]
-            nom = " ".join(words[2:])
-            return (prenom, nom, "élevé")
-        elif len(words) == 2:
-            prenom = words[1]
-            return (prenom, None, "moyen")
 
     if len(words) == 2:
         return (words[0], words[1], "moyen")
@@ -129,26 +129,16 @@ def parse_name(text: str, prenoms_set: Optional[Set[str]] = None) -> Tuple[Optio
 
 
 def _load_prenoms(prenom_list_path: Optional[str], prenom_series: Optional[pd.Series]) -> Tuple[Optional[Set[str]], Optional[Set[str]]]:
-    """
-    Retourne (prenoms_set, prenoms_set_noaccents) ou (None, None) si non fourni.
-    Le fichier peut être :
-     - CSV/Excel avec une colonne 'PRENOM'
-     - CSV/texte simple (première colonne)
-     - pandas.Series fournie directement
-    """
     if prenom_series is not None:
         lst = prenom_series.dropna().astype(str).tolist()
     elif prenom_list_path is not None:
         try:
-            # essayer CSV/Excel avec header; si 'PRENOM' existe on le prend
             tmp = pd.read_csv(prenom_list_path, dtype=str)
             if 'PRENOM' in tmp.columns:
                 lst = tmp['PRENOM'].dropna().astype(str).tolist()
             else:
-                # fallback: première colonne
                 lst = tmp.iloc[:, 0].dropna().astype(str).tolist()
         except Exception:
-            # si lecture csv échoue, tenter lecture en tant que txt simple
             try:
                 with open(prenom_list_path, 'r', encoding='utf-8') as f:
                     lst = [line.strip() for line in f if line.strip()]
@@ -163,13 +153,8 @@ def _load_prenoms(prenom_list_path: Optional[str], prenom_series: Optional[pd.Se
 
 
 def _prenom_matches(prenom: Optional[str], prenoms_set: Optional[Set[str]], prenoms_set_noacc: Optional[Set[str]]) -> bool:
-    """
-    Vérifie si une partie (token) du prenom existe dans prenoms_set.
-    Utilise aussi une version sans accents pour améliorer matching.
-    """
     if not prenom or (not prenoms_set and not prenoms_set_noacc):
         return False
-    # split tokens sur espace, tiret, apostrophe, etc.
     tokens = re.split(r"[ \-'\u2019’]+", str(prenom))
     for t in tokens:
         t_clean = t.strip(" .").lower()
@@ -187,27 +172,18 @@ def process_excel(input_excel: str,
                   prenom_list_path: Optional[str] = None,
                   prenom_series: Optional[pd.Series] = None,
                   sheet_name: Optional[str] = None) -> pd.DataFrame:
-    """
-    Lit l'Excel input (colonne 'BENEFICIARES'), extrait NOM/PRENOM/CONFIDENCE,
-    puis pour chaque ligne : si une partie du PRENOM extrait est trouvée dans la
-    liste fournie, on ajoute un '+' à CONFIDENCE (ex: 'élevé' -> 'élevé+').
-    On **ne supprime aucune ligne**.
-    Retourne un DataFrame où l'ordre de colonnes inclut au minimum : NOM, PRENOM, CONFIDENCE.
-    """
-    # lecture du fichier principal
+
     df = pd.read_excel(input_excel, sheet_name=sheet_name) if sheet_name else pd.read_excel(input_excel)
     if "BENEFICIARES" not in df.columns:
         raise ValueError("Le fichier Excel doit contenir une colonne appelée 'BENEFICIARES'")
 
-    # charger la liste des prénoms (si fournie)
     prenoms_set, prenoms_set_noacc = _load_prenoms(prenom_list_path, prenom_series)
 
-    # extraction
+    # Extraction
     results = df["BENEFICIARES"].astype(object).apply(lambda x: parse_name(x, prenoms_set))
-    # parse_name renvoie (prenom, nom, confidence)
     df[["PRENOM", "NOM", "CONFIDENCE"]] = pd.DataFrame(results.tolist(), index=df.index)
 
-    # pour chaque ligne : si une partie du PRENOM match la liste, ajouter '+'
+    # Pour toutes lignes : ajouter + si prénom trouvé dans liste
     def update_conf(row):
         conf = row["CONFIDENCE"] or ""
         prenom = row["PRENOM"]
@@ -218,7 +194,12 @@ def process_excel(input_excel: str,
 
     df["CONFIDENCE"] = df.apply(update_conf, axis=1)
 
-    # Réordonner colonnes : on met BENEFICIARES (si présent), puis NOM, PRENOM, CONFIDENCE, puis le reste
+    # Pour confidence faible : tout mettre dans NOM et PRENOM vide
+    mask_faible = df["CONFIDENCE"].str.lower().str.startswith("faible")
+    df.loc[mask_faible, "NOM"] = df.loc[mask_faible, "BENEFICIARES"]
+    df.loc[mask_faible, "PRENOM"] = None
+
+    # Réordonner colonnes : BENEFICIARES, NOM, PRENOM, CONFIDENCE, reste
     cols_rest = [c for c in df.columns if c not in ("BENEFICIARES", "NOM", "PRENOM", "CONFIDENCE")]
     new_order = []
     if "BENEFICIARES" in df.columns:
@@ -232,10 +213,9 @@ def process_excel(input_excel: str,
     return df
 
 
-# ==== exemple d'utilisation rapide ====
+# ==== Exemple d'utilisation ====
 if __name__ == "__main__":
     try:
-        # exemple : 'prenoms.csv' peut contenir une colonne 'PRENOM' ou être une liste en 1ère colonne
         out = process_excel("input.xlsx", output_excel="input_extracted.xlsx", prenom_list_path="prenoms.csv")
         print("Traitement terminé. Exemple lignes extraites :")
         print(out.head(20)[["BENEFICIARES","NOM","PRENOM","CONFIDENCE"]])
