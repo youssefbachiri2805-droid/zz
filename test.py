@@ -1,18 +1,8 @@
-# extract_nom_prenom_multiple.py
+# extract_nom_prenom_multi_final.py
 import re
 import unicodedata
 import pandas as pd
 from typing import Optional, Tuple, Set
-
-# construction du NOM en retirant les titles
-def clean_nom(nom: Optional[str]) -> Optional[str]:
-    if not nom:
-        return None
-    words = [w for w in nom.split() if not is_title_token(w)]
-    if not words:
-        return None
-    return " ".join(words)
-
 
 # ==== CONFIG / listes utiles ====
 TITLES = {"m", "mr", "mme", "madame", "monsieur", "mlle", "mme.", "m.", "dr", "pr", "prof"}
@@ -25,6 +15,7 @@ BRACKET_RE = re.compile(r'[\[\]\(\)]')
 MULTISPACE = re.compile(r'\s+')
 NUM_RE = re.compile(r'\d+')
 
+# ==== fonctions utilitaires ====
 def strip_accents(s: str) -> str:
     if s is None:
         return ""
@@ -70,13 +61,18 @@ def probable_name_from_label(s: str) -> Optional[Tuple[str,str]]:
     return None
 
 def parse_name(text: str, prenoms_set: Optional[Set[str]] = None) -> Tuple[Optional[str], Optional[str], str]:
+    if pd.isna(text):
+        text = ""
+    text = str(text)
     s = normalize(text)
     if not s:
         return (None, None, "faible")
 
+    # mot clé société
     if any(w.upper() in COMPANY_WORDS for w in s.split()):
         return (None, text.strip(), "faible")
 
+    # contient nombre
     if NUM_RE.search(text):
         return (None, text.strip(), "faible")
 
@@ -90,6 +86,7 @@ def parse_name(text: str, prenoms_set: Optional[Set[str]] = None) -> Tuple[Optio
     if not words:
         return (None, None, "faible")
 
+    # TITLES multiples
     last_title_idx = -1
     for i, w in enumerate(words):
         if is_title_token(w):
@@ -163,6 +160,14 @@ def _prenom_matches(prenom: Optional[str], prenoms_set: Optional[Set[str]], pren
             return True
     return False
 
+def clean_nom(nom: Optional[str]) -> Optional[str]:
+    if not nom:
+        return None
+    words = [w for w in str(nom).split() if not is_title_token(w)]
+    if not words:
+        return None
+    return " ".join(words)
+
 def process_excel_multi(input_excel: str,
                         output_excel: Optional[str] = None,
                         prenom_list_path: Optional[str] = None,
@@ -179,14 +184,14 @@ def process_excel_multi(input_excel: str,
         results = df[col].astype(object).apply(lambda x: parse_name(x, prenoms_set))
         df[[f"PRENOM_{col}", f"NOM_{col}", f"CONFIDENCE_{col}"]] = pd.DataFrame(results.tolist(), index=df.index)
 
-        # Ajouter + si prénom trouvé
+        # ajouter + ou modifier confiance
         def update_conf(row):
             conf = row[f"CONFIDENCE_{col}"]
             prenom = row[f"PRENOM_{col}"]
             if prenom and _prenom_matches(prenom, prenoms_set, prenoms_set_noacc):
-                if conf.lower().startswith("élevé") and not conf.endswith('+'):
+                if conf.lower().startswith("élevé"):
                     return "SURE"
-                elif conf.lower().startswith("moyen") and not conf.endswith('+'):
+                elif conf.lower().startswith("moyen"):
                     return "CRITIQUE"
             return conf
         df[f"CONFIDENCE_{col}"] = df.apply(update_conf, axis=1)
@@ -195,25 +200,27 @@ def process_excel_multi(input_excel: str,
         mask_faible_moyen = df[f"CONFIDENCE_{col}"].str.lower().str.startswith(("faible","moyen"))
         df.loc[mask_faible_moyen, f"NOM_{col}"] = df.loc[mask_faible_moyen, col]
         df.loc[mask_faible_moyen, f"PRENOM_{col}"] = None
-        df.loc[mask_faible_moyen & df[f"CONFIDENCE_{col}"].str.lower().str.startswith("moyen"), f"CONFIDENCE_{col}"] = "élevé"
+        df.loc[mask_faible_moyen & df[f"CONFIDENCE_{col}"].str.lower().str.startswith("moyen"), f"CONFIDENCE_{col}"] = "ÉLEVÉ"
         df.loc[mask_faible_moyen & df[f"CONFIDENCE_{col}"].str.lower().str.startswith("faible"), f"CONFIDENCE_{col}"] = "SURE"
 
-        # Vérification longueur NOM >=3 lettres
-        df[f"NOM_{col}"] = df[f"NOM_{col}"].apply(lambda x: x if x and len(str(x).strip()) >=3 else None)
+        # Nettoyer NOM des titles
+        df[f"NOM_{col}"] = df[f"NOM_{col}"].apply(clean_nom)
 
         # Supprimer PRENOM intermédiaire
         df = df.drop(columns=[f"PRENOM_{col}"])
 
     if output_excel:
-        df.to_excel(output_excel, index=False)
+        if output_excel.lower().endswith(".del"):
+            df.to_csv(output_excel, sep='|', quotechar='"', index=False)
+        else:
+            df.to_excel(output_excel, index=False)
 
     return df
-
 
 # ==== Exemple d'utilisation ====
 if __name__ == "__main__":
     try:
-        out = process_excel_multi("input.xlsx", output_excel="input_extracted.xlsx", prenom_list_path="prenoms.csv")
+        out = process_excel_multi("input.xlsx", output_excel="input_extracted.DEL", prenom_list_path="prenoms.csv")
         print("Traitement terminé. Exemple lignes extraites :")
         print(out.head(20))
     except Exception as e:
