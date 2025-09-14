@@ -7,6 +7,7 @@ from typing import Optional, Tuple, Set
 # ==== CONFIG / listes utiles ====
 TITLES = {"m", "mr", "mme", "madame", "monsieur", "mlle", "mme.", "m.", "dr", "pr", "prof"}
 SKIP_TOKENS = {"de", "du", "la", "le", "les", "des", "d'", "bin", "ben", "ibn", "al", "el"}
+COMPANY_WORDS = {"SAS","SARL","SA","CBT","SCI","SERM","SOC","PSF","SCCV","C","ETC","SYND","CAB","EURL","AUTO"}
 
 EMAIL_RE = re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b')
 PHONE_RE = re.compile(r'(\+?\d[\d\-\s().]{6,}\d)')
@@ -63,6 +64,10 @@ def parse_name(text: str, prenoms_set: Optional[Set[str]] = None) -> Tuple[Optio
     if not s:
         return (None, None, "faible")
 
+    # Si mots clés entreprise
+    if any(w.upper() in COMPANY_WORDS for w in s.split()):
+        return (None, text.strip(), "faible")
+
     # Si contient un nombre → confiance faible
     if NUM_RE.search(text):
         return (None, text.strip(), "faible")
@@ -77,7 +82,6 @@ def parse_name(text: str, prenoms_set: Optional[Set[str]] = None) -> Tuple[Optio
     if not words:
         return (None, None, "faible")
 
-    # Virgule "Last, First"
     if ',' in text:
         left, right = text.split(',', 1)
         left_words = split_tokens(normalize(left))
@@ -87,17 +91,17 @@ def parse_name(text: str, prenoms_set: Optional[Set[str]] = None) -> Tuple[Optio
             nom = " ".join(left_words) if left_words else None
             return (prenom, nom, "élevé")
 
-    # Gestion titres multiples TITLE + NOM + PRENOM
-    idx = 0
-    while idx < len(words) and is_title_token(words[idx]):
-        idx += 1
-    if idx < len(words):
-        nom = words[idx]
-        prenom = " ".join(words[idx+1:]) if idx+1 < len(words) else None
-        conf = "élevé" if prenom else "moyen"
-        return (prenom, nom, conf)
+    # Gestion titres multiples : dernier title avant NOM+PRENOM
+    last_title_idx = -1
+    for i, w in enumerate(words):
+        if is_title_token(w):
+            last_title_idx = i
+    if last_title_idx != -1 and last_title_idx < len(words)-1:
+        nom = words[last_title_idx+1]
+        prenom = " ".join(words[last_title_idx+2:]) if len(words) > last_title_idx+2 else None
+        return (prenom, nom, "élevé")
 
-    # Matching prénom liste
+    # Recherche prénom dans liste
     if prenoms_set:
         lower_tokens = [w.lower() for w in words]
         for idx, lt in enumerate(lower_tokens):
@@ -119,10 +123,12 @@ def parse_name(text: str, prenoms_set: Optional[Set[str]] = None) -> Tuple[Optio
     if len(words) >= 3:
         prenom = words[0]
         nom = " ".join(words[1:])
-        return (prenom, nom, "faible")
+        return (prenom, nom, "moyen")
     if len(words) == 1:
         return (None, words[0], "faible")
+
     return (None, None, "faible")
+
 
 def _load_prenoms(prenom_list_path: Optional[str], prenom_series: Optional[pd.Series]) -> Tuple[Optional[Set[str]], Optional[Set[str]]]:
     if prenom_series is not None:
@@ -161,6 +167,7 @@ def _prenom_matches(prenom: Optional[str], prenoms_set: Optional[Set[str]], pren
             return True
     return False
 
+
 def process_excel(input_excel: str,
                   output_excel: Optional[str] = None,
                   prenom_list_path: Optional[str] = None,
@@ -174,50 +181,41 @@ def process_excel(input_excel: str,
     prenoms_set, prenoms_set_noacc = _load_prenoms(prenom_list_path, prenom_series)
 
     results = df["BENEFICIARES"].astype(object).apply(lambda x: parse_name(x, prenoms_set))
-    df[["PRENOM", "NOM", "CONFIDENCE"]] = pd.DataFrame(results.tolist(), index=df.index)
+    df[["PRENOM","NOM","CONFIDENCE"]] = pd.DataFrame(results.tolist(), index=df.index)
 
     # Ajouter + si prénom trouvé
     def update_conf(row):
-        conf = row["CONFIDENCE"] or ""
+        conf = row["CONFIDENCE"]
         prenom = row["PRENOM"]
         if prenom and _prenom_matches(prenom, prenoms_set, prenoms_set_noacc):
-            if not conf.endswith('+'):
-                conf = conf + '+'
+            if conf.lower().startswith("élevé") and not conf.endswith('+'):
+                return "SURE"
+            elif conf.lower().startswith("moyen") and not conf.endswith('+'):
+                return "moyen+"
         return conf
     df["CONFIDENCE"] = df.apply(update_conf, axis=1)
 
-    # FAIBLE ou nombres → tout dans NOM, PRENOM vide, SURE
-    mask_faible = df["CONFIDENCE"].str.lower().str.startswith("faible") | df["BENEFICIARES"].astype(str).str.contains(r'\d')
-    df.loc[mask_faible, "NOM"] = df.loc[mask_faible, "BENEFICIARES"]
-    df.loc[mask_faible, "PRENOM"] = None
-    df.loc[mask_faible, "CONFIDENCE"] = "SURE"
+    # TRAITEMENT FAIBLE et MOYEN
+    mask_faible_moyen = df["CONFIDENCE"].str.lower().str.startswith(("faible","moyen"))
+    df.loc[mask_faible_moyen, "NOM"] = df.loc[mask_faible_moyen, "BENEFICIARES"]
+    df.loc[mask_faible_moyen, "PRENOM"] = None
+    df.loc[mask_faible_moyen & df["CONFIDENCE"].str.lower().str.startswith("moyen"), "CONFIDENCE"] = "élevé"
+    df.loc[mask_faible_moyen & df["CONFIDENCE"].str.lower().str.startswith("faible"), "CONFIDENCE"] = "SURE"
 
-    # Moyen → tout dans NOM sauf titres, PRENOM vide, confiance → élevé
-    mask_moyen = df["CONFIDENCE"].str.lower().str.startswith("moyen")
-    for idx, row in df[mask_moyen].iterrows():
-        benef = str(row["BENEFICIARES"])
-        tokens = split_tokens(benef)
-        # Supprimer les titres
-        while tokens and is_title_token(tokens[0]):
-            tokens.pop(0)
-        df.at[idx, "NOM"] = " ".join(tokens) if tokens else benef
-        df.at[idx, "PRENOM"] = None
-        df.at[idx, "CONFIDENCE"] = "élevé"
-
-    # Élève+ → SURE
-    df["CONFIDENCE"] = df["CONFIDENCE"].replace({"élevé+": "SURE"})
+    # Conversion final + renommage moyen-élevé
+    df["CONFIDENCE"] = df["CONFIDENCE"].replace({"moyen-élevé":"MOYEN", "moyen+":"MOYEN", "élevé+":"SURE"})
 
     # Vérification longueur NOM >=3 lettres
-    df["NOM"] = df["NOM"].apply(lambda x: x if x and len(str(x).strip()) >= 3 else None)
+    df["NOM"] = df["NOM"].apply(lambda x: x if x and len(str(x).strip()) >=3 else None)
 
     # Supprimer PRENOM
-    if "PRENOM" in df.columns:
-        df = df.drop(columns=["PRENOM"])
+    df = df.drop(columns=["PRENOM"])
 
     if output_excel:
         df.to_excel(output_excel, index=False)
 
     return df
+
 
 # ==== Exemple d'utilisation ====
 if __name__ == "__main__":
