@@ -5,12 +5,12 @@ prenoms_df = pd.read_csv("PRENOM.DEL", sep="|")
 test_df = pd.read_csv("TEST.DEL", sep="|")
 
 # Mettre les prénoms en minuscule pour faciliter la comparaison
-prenoms_set = set(prenoms_df["PRENOM"].dropna().str.lower())
+prenoms_set = set(prenoms_df["PRENOM"].astype(str).str.lower())
 
 # 2. Fonction pour extraire le nom
 def extraire_nom(beneficiaire):
-    if pd.isna(beneficiaire):  # si la case est vide
-        return ""
+    if pd.isna(beneficiaire) or str(beneficiaire).strip() == "":
+        return ""  # si vide → renvoie vide
     mots = str(beneficiaire).split()
     # Chercher s'il y a un prénom connu dans la chaîne
     for mot in mots:
@@ -21,10 +21,16 @@ def extraire_nom(beneficiaire):
     # Si aucun prénom trouvé → tout le contenu est NOM
     return str(beneficiaire)
 
-# 3. Appliquer sur la colonne BENEFICIAIRE
-test_df["NOM"] = test_df["BENEFICIAIRE"].apply(extraire_nom)
+# 3. Colonnes à traiter
+colonnes_benef = ["BENEFICIAIRE", "BENEFICIAIRE 1", "BENEFICIAIRE 2", "BENEFICIAIRE 3"]
 
-# 4. Sauvegarder le résultat dans TEST.DEL (en réécrivant le fichier)
+# 4. Appliquer le traitement à chaque colonne
+for col in colonnes_benef:
+    if col in test_df.columns:  # vérifier que la colonne existe
+        new_col = f"NOM_{col.replace(' ', '')}"  # ex: BENEFICIAIRE 1 -> NOM_BENEFICIAIRE1
+        test_df[new_col] = test_df[col].apply(extraire_nom)
+
+# 5. Sauvegarder le résultat
 test_df.to_csv("TEST.DEL", sep="|", index=False, quoting=1)
 
-print("✅ Fichier TEST.DEL mis à jour avec la colonne NOM")
+print("✅ Fichier TEST.DEL mis à jour avec les colonnes NOM_BENEFICIAIRE, NOM_BENEFICIAIRE1, NOM_BENEFICIAIRE2, NOM_BENEFICIAIRE3")
